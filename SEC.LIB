@@ -1,0 +1,599 @@
+﻿;****************************************;
+;*					*;
+;*	Обработчик прерывания int 20h	*;
+;*					*;
+;****************************************;
+;
+;
+;	Функция	( задается в AH ) :
+;
+;-----------------------------------------------------------------------;
+;									;
+; 00:									;
+;	Подготовка памяти.					     	;
+;	  Вход  : CS ─ сегмент программы;  BX ─ смещение конца программы;
+;		относмтельно CS.					;
+;	  Выход : CF ─ код успеха.					;
+;									;
+;-----------------------------------------------------------------------;
+;									;
+;  01:									;
+;	Инициализация диска : пpовека типи накопителя;			;
+;	 определение первого сектора корневого каталога, и т.д.		;
+;	  Вход  : нет.							;
+;	  Выход : 							;
+;									;
+;-----------------------------------------------------------------------;
+;									;
+;  10:									;
+;	Найти следующий файл.						;
+;	  Вход	: DS ─ сегмент области обмена.				;
+;	  Выход : в сегменте DS ─ пеpвый сектоp файла со смещением 0.	;
+;									;
+;		CF пpи AL=55 ─ Нет больше файлов.			;
+;									;
+;-----------------------------------------------------------------------;
+;									;
+;  FF:									;
+;	Восстановление стаpого адpеса обаботчика пpеывания 20h и выход с;
+;	 кодом в AL.							;
+;	 Вход  : AL ─ код возвpата					;
+;	 Выход : нет.							;	
+;									;
+;-----------------------------------------------------------------------;
+;									;
+;
+;
+;
+;
+;
+
+
+
+
+	mov	ax,3520h
+
+	push	es
+	push	ds
+
+	push	cs
+	pop	ds
+
+	int	21h
+	mov	word ptr ds:old20o,bx
+	mov	word ptr ds:old20s,es
+
+	mov	ax,2520h
+	lea	dx,NewInt20h
+	int	21h
+
+	pop	ds
+	pop	es
+
+	jmp	Int20hEnd
+
+	
+NewInt20h:
+	sti	
+        or      ah,ah
+        jnz     Not0
+
+AllocMem:
+	push    es
+	push    cs
+	pop     es
+	push    cx
+	mov     cx,4
+	shl     bx,cl
+	pop     cx
+	inc     bx
+	mov     ah,4Ah
+	int     21h
+	pop     es
+	jnc     AllocInternalStack
+	retf    2
+
+AllocInternalStack:
+	mov	ah,48h
+	mov	bx,0FFFFh/16
+	int	21h
+        jnc     StackAllocated
+        retf    2
+
+StackAllocated:
+	mov	word ptr cs:InternalSS,ax
+        clc
+        retf    2
+
+
+Not0:
+        cmp     ah,1
+        jz      FindFirstDirSector
+        jmp     Not1
+
+FindFirstDirSector:
+	pushf
+	cld
+	push	ds
+       	push	es
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	push	di
+	push	bp
+	
+	mov	ah,48h
+	mov	bx,64/16
+	int	21h		;Выделим память для хpанения диpектоии
+	jnc	SuccAllocForDir
+	jmp	BadExitFromFFDS
+
+SuccAllocForDir:
+
+	mov	bp,ax	
+	mov	ds,ax
+	xor	si,si
+	mov	dl,0
+	mov	ah,47h
+	int	21h		;Запомним диpектоию
+
+
+	mov	ah,1Bh
+	int	21h
+	cmp	cx,512
+	jz	NormSec
+	jmp	BadExitFromFFDS
+NormSec:
+
+        push    cs
+        pop     ds
+
+	mov	byte ptr ds:SectorPerCluster,al
+
+	mov	ah,3Bh
+	lea	dx,CDDown
+	int	21h		;Установим коневой каталог
+
+
+	mov	ah,19h
+	int	21h
+	mov	byte ptr ds:CurDrive,al
+	
+
+	lea	dx,MskAll
+	mov	cx,0FFh
+	mov	ah,4Eh
+	int	21h
+	jnc	PrepareNormFnameArea
+        jmp     BadExitFromFFDS
+
+PrepareNormFnameArea:
+        mov     bx,1
+        mov     ah,48h
+        int     21h
+        jnc     AllocNFSucc
+        jmp     BadExitFromFFDS
+
+AllocNFSucc:
+        mov     es,ax
+        xchg    ax,bx
+
+	mov	di,NormFname
+	mov	cx,11
+	mov	al,20h	; ASKII	──> ' '
+	rep	stosb
+
+        push    cs
+        pop     es
+
+	mov	dx,9Eh
+	mov	cx,10
+	mov	al,'.'
+	mov	di,dx
+	repnz	scasb
+	jz	Next1
+	mov	cx,10
+	mov	al,0
+	mov	di,dx
+	repnz	scasb
+	mov	cx,di
+	sub	cx,dx
+	mov 	si,dx
+	mov	di,NormFName
+	dec	cx
+        mov     es,bx
+	rep	movsb
+	jmp	short EndAnFN
+
+Next1:
+	mov	si,di
+	mov	di,dx
+	mov	cx,12
+	mov	al,0	
+	repnz	scasb
+	mov	cx,di
+	sub	cx,si
+	mov	di,NormFname+8	
+	dec	cx
+        mov     es,bx
+	rep     movsb
+
+	mov	cx,10
+	mov	al,'.'
+	mov	di,dx
+        push    cs
+        pop     es
+	repnz	scasb
+	mov	cx,di
+	sub	cx,dx
+	mov 	si,dx
+	mov	di,NormFName
+	dec	cx
+        mov     es,bx
+	rep	movsb
+EndAnFN:
+
+	call    GetMemForSector
+	jnc     AllocMemForSector
+	jmp     BadExitFromFFDS
+
+AllocMemForSector:
+	mov     ds,ax
+	
+	xor	ax,ax
+
+	mov	word ptr es:TempWord0,ax
+	mov	word ptr es:TempWord1,ax
+	mov	word ptr cs:BlockSize,ax
+
+	jmp	short FDLoop
+FDLoopp:
+	inc	word ptr es:TempWord1
+
+FDLoop:
+	mov	bx,TempWord0 ;oтвечает за номер сектора и наход. в сегм. ES
+	inc	word ptr es:[bx]
+	mov	dx,word ptr es:[bx]
+        xor     bx,bx  ; Смещение в DS, сегменте для хранения сектора
+	mov	cx,1   ; Читаем 1 сектор
+	mov	al,byte ptr cs:CurDrive
+	push	bp
+	int	25h
+	pop	si
+	pop	bp
+        jnc     SuccReadedSector
+        jmp     BadExitFromFFDS
+
+SuccReadedSector:
+        xor     si,si         ;Смещение в DS, сегменте для хранения сектора
+        mov     di,NormFname  ;Смещение в ES, сегменте для хранения NormFN
+NotE5Again:
+	cmp	byte ptr ds:[si],0E5h
+	jnz	NotE5
+	add	si,32
+	cmp	si,512
+	je	FDLoopp
+	jmp	short NotE5Again 	
+NotE5:
+	mov	cx,10
+	rep	cmpsb
+	jnz	FDLoop
+
+_FounFirstDirSector:
+	mov	ax,word ptr es:TempWord0
+	sub	ax,word ptr es:TempWord1
+	mov	word ptr cs:FirstDirSector,ax
+	mov	word ptr cs:SectorToRead,ax
+
+FoundFirstDirSector:
+
+
+	mov	ax,ds
+	call	FreeMem
+
+	mov	ax,es
+	call	FreeMem
+
+	mov	ds,bp
+	mov	ah,3Bh
+	xor	dx,dx
+	int	21h
+
+	mov	ax,bp
+	call	FreeMem
+
+	pop	bp
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	es
+	pop	ds
+	popf
+        clc
+        retf    2
+
+BadExitFromFFDS:
+	pop	bp
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+        pop     es
+        pop     ds
+	popf
+	stc
+        retf    2
+
+
+
+Not1:
+	cmp	ah,10h
+	jz	FindNext
+	jmp	Not10
+
+FindNext:
+	push	ds
+	pop	word ptr cs:NewDta
+
+
+FNReadSector:
+	mov	ax,word ptr cs:BlockSize
+	or	ax,ax
+	jnz	SectorAlreadyRed
+
+ReadNextSector:
+	call	GetMemForSector
+	mov	ds,ax
+	mov	word ptr cs:SegmentOfBlock,ax
+	mov	word ptr cs:BlockSize,512
+	lea	bx,SectorToRead
+	mov	dx,word ptr cs:[bx]
+	inc	word ptr cs:[bx]
+	xor	bx,bx
+	mov	cx,1
+	mov	al,byte ptr cs:CurDrive
+	int	25h
+	pop	cx
+	jmp	short AnalyzeElement
+	
+SectorAlreadyRed:
+	push	word ptr cs:SegmentOfBlock
+	pop	ds
+
+NextElement:
+	
+	call	ScrollMem
+	mov	ax,word ptr cs:BlockSize
+	or	ax,ax
+	jz	ReadNextSector
+	
+AnalyzeElement:
+	mov	al,byte ptr ds:[0]
+	cmp	al,0
+	jnz	NotTheEnd
+	jmp	ExitFromDir
+NotTheEnd:
+	cmp	al,0E5h
+	jz	NextElement
+
+	mov	al,byte ptr ds:[11]
+	test	al,00001000b	; <── VolumeID
+	jnz	NextElement
+	test	al,00010000b
+	jz	NotSubDir	
+	
+	jmp	NextElement	; <===== Веменно !!!!
+
+
+NotSubDir:
+	mov	ax,word ptr ds:[26]
+	sub	ax,2
+	mov	bl,byte ptr cs:SectorPerCluster
+	mov	bh,0
+	mul	bx
+	add	ax,111
+	xchg	ax,dx
+
+	push	word ptr cs:NewDta
+	pop	ds
+	mov	al,byte ptr cs:CurDrive
+	xor	bx,bx
+	mov	cx,1
+	int	25h
+	pop	cx
+	iret
+
+
+
+			
+
+
+
+ExitFromDir:
+	mov	ax,word ptr cs:InternalSP
+	or	ax,ax
+	jz	NoMoreFilesOnDisk
+	mov	ax,ds
+	call	FreeMem
+	call	PopPointers
+	mov	word ptr cs:SectorToRead,ax
+	mov	word ptr cs:BlockSize,bx
+	mov	word ptr cs:SegmentOfBlock,cx
+	jmp	ReadNextSector
+
+
+	iret
+
+
+
+NoMoreFilesOnDisk:
+	stc
+	mov	al,55h
+	retf	2
+
+
+Not10:
+	cmp	ah,0FFh
+	jz	Exit
+	iret
+
+old20o	dw	0
+old20s	dw	0
+
+Exit:	
+	push	ax
+	mov	dx,old20o
+	mov	ax,old20s
+	mov	ds,ax
+	mov	ax,2520h
+	int	21h
+	pop	ax
+	mov	ah,4Ch
+	int	21h
+
+
+CDDown			db	'\',0
+MskAll			db	'*.*',0
+CurDrive		db	0
+SectorPerCluster 	db	0
+FirstDirSector		dw	0
+
+BlockSize		dw	0
+SegmentOfBlock		dw	0
+SectorToRead		dw	0
+
+
+
+InternalSS		dw	0
+InternalSP		dw	0
+
+
+NewDta			dw	0
+
+NormFname = 0
+TempWord0 = NormFname+11
+TempWord1 = TempWord0+2
+
+
+ScrollMem:
+	push	ax
+	pushf
+	cld
+	push	ds
+	push	es
+	push	si
+	push	di
+	push	bx
+	push	cx
+	
+	push	word ptr cs:SegmentOfBlock
+	pop	ds
+	push	ds
+	pop	es
+	
+	mov	ax,20h
+	mov	si,ax
+	lea	di,BlockSize
+	mov	cx,word ptr cs:[di]
+	sub	cx,ax
+	mov	word ptr cs:[di],cx 
+	or 	cx,cx
+	jnz	NotEmpty
+	mov	ax,ds
+	call	FreeMem
+	jmp	short ExitScrollMem
+
+NotEmpty:
+	xor	di,di
+
+	mov	bx,cx
+
+	rep	movsb
+
+	mov	ah,4Ah
+	int	21h
+
+ExitScrollMem:
+	pop	cx
+	pop	bx
+	pop	di
+	pop	si
+
+	
+
+	pop	es
+	pop	ds
+	popf
+	pop	ax
+	ret
+
+GetMemForSector:
+        mov     bx,512/16
+        mov     ah,48h
+        int     21h
+        ret
+
+FreeMem:
+	push	es
+	mov	es,ax
+	mov	ah,49h
+	int	21h
+	pop	es
+	ret
+
+;//////////////////////////////////////////////////////////////
+;
+;PushPointers & PopPointers parameters
+;
+;AX ─ SectorToRead
+;BX ─ BlockSize
+;CX ─ SegmentOfBlock 
+
+PushPointers:
+	call	PushAX
+	xchg	ax,bx
+	call	PushAX
+	xchg	ax,cx
+	call	PushAX
+	xchg	ax,cx
+	xchg	ax,bx
+	ret
+		
+PushAX:
+	push	ds
+	push	word ptr cs:InternalSS
+	pop	ds
+	push	bx
+	mov	bx,word ptr cs:InternalSP
+	mov	word ptr ds:[bx],ax
+	add	word ptr cs:InternalSP,2
+	pop	bx
+	pop	ds
+	ret
+
+PopPointers:
+	call	PopAX
+	xchg	ax,cx
+	call	PopAX
+	xchg	ax,bx
+	call	PopAX
+	ret
+
+PopAX:
+	push	ds
+	push	word ptr cs:InternalSS
+	pop	ds
+	push	bx
+	sub	word ptr cs:InternalSP,2
+	mov	bx,word ptr cs:InternalSP
+	mov	ax,word ptr ds:[bx]
+	pop	bx
+	pop	ds
+	ret
+
+;\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+Int20hEnd:
